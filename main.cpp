@@ -20,17 +20,42 @@
 #include <g2o/core/robust_kernel.h>
 #include <g2o/core/robust_kernel_impl.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
+
+#include <g2o/core/optimization_algorithm_gauss_newton.h>
+
 #include <g2o/solvers/cholmod/linear_solver_cholmod.h>
 #include <g2o/types/slam3d/se3quat.h>
 #include <g2o/types/sba/types_six_dof_expmap.h>
-
 
 using namespace std;
 
 // 寻找两个图像中的对应点，像素坐标系
 // 输入：img1, img2 两张图像
 // 输出：points1, points2, 两组对应的2D点
+
+// 曲线模型的顶点，模板参数：优化变量维度和数据类型
+class CurveFittingVertex : public g2o::BaseVertex<3, Eigen::Vector3d> {
+public:
+   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+     // 重置
+   virtual void setToOriginImpl() override {
+   	 _estimate << 0, 0, 0;
+   }
+
+   // 更新
+   virtual void oplusImpl(const double *update) override {
+   	_estimate += Eigen::Vector3d(update);
+   }
+
+   // 存盘和读盘：留空
+   virtual bool read(istream &in) {}
+   virtual bool write(ostream &out) const {}
+};
+
+
+
 int     findCorrespondingPoints( const cv::Mat& img1, const cv::Mat& img2, vector<cv::Point2f>& points1, vector<cv::Point2f>& points2 );
+
 
 // 相机内参
 double cx = 325.5;
@@ -60,20 +85,33 @@ int main( int argc, char** argv )
     }
     cout<<"找到了"<<pts1.size()<<"组对应特征点。"<<endl;
     // 构造g2o中的图
-    // 先构造求解器
+    // 先构造求器
+
+
     g2o::SparseOptimizer    optimizer;
     // 使用Cholmod中的线性方程求解器
-    g2o::BlockSolver_6_3::LinearSolverType* linearSolver = new  g2o::LinearSolverCholmod<g2o::BlockSolver_6_3::PoseMatrixType> ();
-    // 6*3 的参数
-    g2o::BlockSolver_6_3* block_solver = new g2o::BlockSolver_6_3( linearSolver );
+
+    typedef g2o::BlockSolver<g2o::BlockSolver_6_3> BlockSolverType;
+
+    typedef g2o::LinearSolverCholmod<BlockSolverType::PoseMatrixType> LinearSolverType;
+
+
+    auto solver = new g2o::OptimizationAlgorithmGaussNewton(
+		    g2o::make_unique<BlockSolverType>(g2o::make_unique<LinearSolverType>()));
+
+    auto solver1 = new g2o::OptimizationAlgorithmLevenberg(
+		    g2o::make_unique<BlockSolverType>(g2o::make_unique<LinearSolverType>()));
+
+
     // L-M 下降 
-    g2o::OptimizationAlgorithmLevenberg* algorithm = new g2o::OptimizationAlgorithmLevenberg( block_solver );
+   // g2o::OptimizationAlgorithmLevenberg* algorithm = new g2o::OptimizationAlgorithmLevenberg( block_solver );
     
-    optimizer.setAlgorithm( algorithm );
+    //optimizer.setAlgorithm( algorithm );
+    optimizer.setAlgorithm( solver1 );
     optimizer.setVerbose( false );
-    
     // 添加节点
     // 两个位姿节点
+
     for ( int i=0; i<2; i++ )
     {
         g2o::VertexSE3Expmap* v = new g2o::VertexSE3Expmap();
@@ -84,6 +122,7 @@ int main( int argc, char** argv )
         v->setEstimate( g2o::SE3Quat() );
         optimizer.addVertex( v );
     }
+
     // 很多个特征点的节点
     // 以第一帧为准
     for ( size_t i=0; i<pts1.size(); i++ )
@@ -98,7 +137,6 @@ int main( int argc, char** argv )
         v->setEstimate( Eigen::Vector3d(x,y,z) );
         optimizer.addVertex( v );
     }
-    
     // 准备相机参数
     g2o::CameraParameters* camera = new g2o::CameraParameters( fx, Eigen::Vector2d(cx, cy), 0 );
     camera->setId(0);
@@ -173,17 +211,23 @@ int main( int argc, char** argv )
     
     cout<<"inliers in total points: "<<inliers<<"/"<<pts1.size()+pts2.size()<<endl;
     optimizer.save("ba.g2o");
+
     return 0;
 }
 
 
 int     findCorrespondingPoints( const cv::Mat& img1, const cv::Mat& img2, vector<cv::Point2f>& points1, vector<cv::Point2f>& points2 )
 {
-    cv::ORB orb;
+    //cv::ORB orb;
+    cv::Ptr<cv::ORB> d_orb = cv::ORB::create();
+
+
     vector<cv::KeyPoint> kp1, kp2;
     cv::Mat desp1, desp2;
-    orb( img1, cv::Mat(), kp1, desp1 );
-    orb( img2, cv::Mat(), kp2, desp2 );
+    //orb( img1, cv::Mat(), kp1, desp1 );
+    //orb( img2, cv::Mat(), kp2, desp2 );
+    d_orb->detectAndCompute( img1, cv::Mat(), kp1, desp1 );
+    d_orb->detectAndCompute( img2, cv::Mat(), kp2, desp2 );
     cout<<"分别找到了"<<kp1.size()<<"和"<<kp2.size()<<"个特征点"<<endl;
     
     cv::Ptr<cv::DescriptorMatcher>  matcher = cv::DescriptorMatcher::create( "BruteForce-Hamming");
@@ -206,7 +250,7 @@ int     findCorrespondingPoints( const cv::Mat& img1, const cv::Mat& img2, vecto
         points1.push_back( kp1[m.queryIdx].pt );
         points2.push_back( kp2[m.trainIdx].pt );
     }
-    
+
     return true;
 }
 
